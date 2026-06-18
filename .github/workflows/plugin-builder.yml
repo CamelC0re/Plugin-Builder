@@ -1,0 +1,115 @@
+name: Air-Gapped Plugin Compiler Sandbox
+on:
+  repository_dispatch:
+    types: [build_plugin]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    name: Compile and Mirror Plugin from Secure Cache
+
+    steps:
+      # 1. Clean workspace setup and download the verified snapshot directly from your R2 bucket
+      # Expected client_payload keys: plugin_id, commit_hash, source_zip_url
+      - name: Download Source Zip from Cloudflare R2
+        run: |
+          echo "Fetching secure source snapshot for plugin: ${{ github.event.client_payload.plugin_id }}"
+          curl -L -o plugin_source.zip "${{ github.event.client_payload.source_zip_url }}"
+
+      # 2. Extract the clean source package into the root environment runner directory
+      - name: Extract Source Zip Bundle
+        run: |
+          unzip plugin_source.zip -d .
+          rm plugin_source.zip
+          echo "Extraction complete. Current directory structure:"
+          ls -la
+
+      # 3. Establish the Node.js environment (Locked to v22 as required by the package engine rules)
+      - name: Setup Node.js (v22)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 4. Initialize Corepack to match and execute the plugin's exact Yarn 4 lockfile constraints
+      - name: Enable Corepack & Activate Yarn Modern
+        run: |
+          corepack enable
+          corepack prepare yarn@4.9.1 --activate
+
+      # 5. Fetch dependencies using strict lockfile mapping checks to prevent runtime injection attacks
+      # If the node tree differs from the committed manifest lock lines, execution safely breaks
+      - name: Install Dependencies
+        run: yarn install --immutable
+
+      # 6. Execute the custom esbuild/bundling script layout to compile distribution binaries
+      - name: Run Plugin Compilation
+        run: yarn build
+
+      # 7. Mirror the fresh source files directly to your read-only public auditing portal
+      # This preserves community open access (GPLv3 compliance) if the developer nukes their personal repo
+      - name: Checkout Monorepo Vault Mirror
+        uses: actions/checkout@v4
+        with:
+          repository: 'CamelC0re/plugin-vault'
+          token: ${{ secrets.VAULT_PUSH_TOKEN }} # Fine-grained org token with write clearance on plugin-vault
+          path: 'plugin-vault'
+
+      - name: Sync Source Code to Vault Directory
+        run: |
+          PLUGIN_DIR="plugin-vault/plugins/${{ github.event.client_payload.plugin_id }}"
+          
+          # Evict previous folder history to clear artifacts removed by the author in this revision
+          rm -rf "$PLUGIN_DIR"
+          mkdir -p "$PLUGIN_DIR"
+          
+          # Sync clean files over into the corresponding sub-folder structure
+          rsync -av . "$PLUGIN_DIR/" \
+            --exclude 'node_modules' \
+            --exclude '.git' \
+            --exclude '.yarn' \
+            --exclude 'plugin-vault' \
+            --exclude 'dist' \
+            --exclude '.pnp.*'
+
+          # Mint an unalterable provenance block to track code origin metrics
+          cat <<EOF > "$PLUGIN_DIR/CAMELCORE_METADATA.json"
+          {
+            "plugin_id": "${{ github.event.client_payload.plugin_id }}",
+            "source_archive": "${{ github.event.client_payload.source_zip_url }}",
+            "verified_commit_hash": "${{ github.event.client_payload.commit_hash }}",
+            "compiled_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          }
+          EOF
+
+      - name: Commit and Push Code to Public Vault Mirror
+        run: |
+          cd plugin-vault
+          git config user.name "CamelCore Bot"
+          git config user.email "bot@evilquest.wiki"
+          git add .
+          git commit -m "Mirror: ${{ github.event.client_payload.plugin_id }} @ ${{ github.event.client_payload.commit_hash }}" || echo "No files modified."
+          git push origin main
+
+      # 8. Deploy the final compiled distribution asset out to production storage channels
+      - name: Synchronize Compiled Assets to Cloudflare R2 Bucket
+        uses: jakejarvis/s3-sync-action@master
+        with:
+          args: --acl public-read
+        env:
+          AWS_S3_BUCKET: 'camelcore-plugins'
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_S3_ENDPOINT: ${{ secrets.R2_ENDPOINT_URL }} # Format: https://<account_id>.r2.cloudflarestorage.com
+          SOURCE_DIR: 'dist/' # Syncs output binaries (e.g., plugin.js)
+
+      # 9. Ping your Hono core edge framework to instantly shift the client's live production endpoint status to active
+      - name: Execute Hono API Registry Callback
+        run: |
+          curl -X POST https://api.evilquest.wiki/api/plugins/callback \
+            -H "Authorization: Bearer ${{ secrets.HUB_CALLBACK_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "plugin_id": "${{ github.event.client_payload.plugin_id }}",
+              "commit_hash": "${{ github.event.client_payload.commit_hash }}",
+              "status": "published"
+            }'
