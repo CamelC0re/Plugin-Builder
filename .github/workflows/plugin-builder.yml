@@ -62,12 +62,24 @@ jobs:
       - name: Sync Source Code to Vault Directory
         run: |
           PLUGIN_DIR="plugin-vault/plugins/${{ github.event.client_payload.plugin_name }}"
+          METADATA_FILE="$PLUGIN_DIR/CAMELCORE_METADATA.json"
           
-          # Evict previous folder history to clear artifacts removed by the author in this revision
+          # 1. Stash existing metadata if it exists
+          if [ -f "$METADATA_FILE" ]; then
+            cp "$METADATA_FILE" /tmp/OLD_METADATA.json
+          else
+            rm -f /tmp/OLD_METADATA.json
+          fi
+
+          # 2. Extract versions and licenses from the plugin's package.json
+          PLUGIN_VERSION=$(jq -r '.version // "1.0.0"' package.json 2>/dev/null || echo "1.0.0")
+          PLUGIN_LICENSE=$(jq -r '.license // "Unknown"' package.json 2>/dev/null || echo "Unknown")
+
+          # 3. Evict previous folder history to clear artifacts removed by the author in this revision
           rm -rf "$PLUGIN_DIR"
           mkdir -p "$PLUGIN_DIR"
           
-          # Sync clean files over into the corresponding sub-folder structure
+          # 4. Sync clean files over into the corresponding sub-folder structure
           rsync -av . "$PLUGIN_DIR/" \
             --exclude 'node_modules' \
             --exclude '.git' \
@@ -76,15 +88,52 @@ jobs:
             --exclude 'dist' \
             --exclude '.pnp.*'
 
-          # Mint an unalterable provenance block to track code origin metrics
-          cat <<EOF > "$PLUGIN_DIR/CAMELCORE_METADATA.json"
-          {
-            "plugin_id": "${{ github.event.client_payload.plugin_id }}",
-            "source_archive": "${{ github.event.client_payload.source_zip_url }}",
-            "verified_commit_hash": "${{ github.event.client_payload.commit_hash }}",
-            "compiled_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          }
-          EOF
+          # 5. Generate Event Block
+          EVENT_JSON=$(jq -n \
+            --arg version "$PLUGIN_VERSION" \
+            --arg maintainer "${{ github.event.client_payload.author }}" \
+            --arg upstream "${{ github.event.client_payload.github_url }}" \
+            --arg hash "${{ github.event.client_payload.commit_hash }}" \
+            --arg approved_by "${{ github.event.client_payload.approved_by }}" \
+            --arg timestamp "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            '{
+              version: $version,
+              event: "update",
+              maintainer: $maintainer,
+              upstream_repository: $upstream,
+              verified_commit_hash: $hash,
+              approved_by: $approved_by,
+              timestamp: $timestamp
+            }')
+
+          # 6. Reconstruct metadata
+          if [ -f /tmp/OLD_METADATA.json ]; then
+            PREV_MAINTAINER=$(jq -r '.current_maintainer' /tmp/OLD_METADATA.json)
+            if [ "$PREV_MAINTAINER" != "${{ github.event.client_payload.author }}" ]; then
+              EVENT_JSON=$(echo "$EVENT_JSON" | jq '.event = "project_adoption" | .notes = "Plugin ownership transferred or adopted."')
+            fi
+            
+            jq --arg maintainer "${{ github.event.client_payload.author }}" \
+               --arg license "$PLUGIN_LICENSE" \
+               --argjson event "$EVENT_JSON" \
+               '.current_maintainer = $maintainer | .license = $license | .release_history = ([$event] + .release_history)' \
+               /tmp/OLD_METADATA.json > "$METADATA_FILE"
+          else
+            jq -n \
+              --arg id "${{ github.event.client_payload.plugin_name }}" \
+              --arg license "$PLUGIN_LICENSE" \
+              --arg creator "${{ github.event.client_payload.author }}" \
+              --arg maintainer "${{ github.event.client_payload.author }}" \
+              --argjson event "$EVENT_JSON" \
+              '{
+                plugin_id: $id,
+                license: $license,
+                original_creator: $creator,
+                current_maintainer: $maintainer,
+                succession_status: "active",
+                release_history: [$event]
+              }' > "$METADATA_FILE"
+          fi
 
       - name: Commit and Push Code to Public Vault Mirror
         run: |
