@@ -108,8 +108,9 @@ jobs:
 
           # 6. Reconstruct metadata
           if [ -f /tmp/OLD_METADATA.json ]; then
-            PREV_MAINTAINER=$(jq -r '.current_maintainer' /tmp/OLD_METADATA.json)
-            if [ "$PREV_MAINTAINER" != "${{ github.event.client_payload.author }}" ]; then
+            PREV_MAINTAINER=$(jq -r '.current_maintainer' /tmp/OLD_METADATA.json | tr -d '\r\n' | xargs)
+            CURRENT_AUTHOR=$(echo "${{ github.event.client_payload.author }}" | tr -d '\r\n' | xargs)
+            if [ "$PREV_MAINTAINER" != "$CURRENT_AUTHOR" ] && [ "$PREV_MAINTAINER" != "null" ]; then
               EVENT_JSON=$(echo "$EVENT_JSON" | jq '.event = "project_adoption" | .notes = "Plugin ownership transferred or adopted."')
             fi
             
