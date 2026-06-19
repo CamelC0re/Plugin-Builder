@@ -14,13 +14,18 @@ jobs:
       - name: Download Source Zip from Cloudflare R2
         run: |
           echo "Fetching secure source snapshot for plugin: ${{ github.event.client_payload.plugin_id }}"
-          curl -L -o plugin_source.zip "${{ github.event.client_payload.source_zip_url }}"
+          curl -L -H "Authorization: Bearer ${{ secrets.HUB_CALLBACK_TOKEN }}" -o plugin_source.zip "${{ github.event.client_payload.source_zip_url }}"
 
       # 2. Extract the clean source package into the root environment runner directory
       - name: Extract Source Zip Bundle
         run: |
-          unzip plugin_source.zip -d .
-          rm plugin_source.zip
+          unzip plugin_source.zip -d temp_dir
+          # Move contents of the inner root directory (including hidden files) up one level
+          shopt -s dotglob
+          ROOT_DIR=$(ls temp_dir)
+          mv temp_dir/$ROOT_DIR/* .
+          shopt -u dotglob
+          rm -rf temp_dir plugin_source.zip
           echo "Extraction complete. Current directory structure:"
           ls -la
 
@@ -56,7 +61,7 @@ jobs:
 
       - name: Sync Source Code to Vault Directory
         run: |
-          PLUGIN_DIR="plugin-vault/plugins/${{ github.event.client_payload.plugin_id }}"
+          PLUGIN_DIR="plugin-vault/plugins/${{ github.event.client_payload.plugin_name }}"
           
           # Evict previous folder history to clear artifacts removed by the author in this revision
           rm -rf "$PLUGIN_DIR"
@@ -101,11 +106,12 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_S3_ENDPOINT: ${{ secrets.R2_ENDPOINT_URL }} # Format: https://<account_id>.r2.cloudflarestorage.com
           SOURCE_DIR: 'dist/' # Syncs output binaries (e.g., plugin.js)
+          DEST_DIR: '${{ github.event.client_payload.plugin_id }}'
 
       # 9. Ping your Hono core edge framework to instantly shift the client's live production endpoint status to active
       - name: Execute Hono API Registry Callback
         run: |
-          curl -X POST https://api.evilquest.wiki/api/plugins/callback \
+          curl -X POST ${{ secrets.API_CALLBACK_URL }} \
             -H "Authorization: Bearer ${{ secrets.HUB_CALLBACK_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{
