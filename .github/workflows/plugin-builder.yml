@@ -9,6 +9,17 @@ jobs:
     name: Compile and Mirror Plugin from Secure Cache
 
     steps:
+      - name: Report Build Status (Building)
+        run: |
+          curl -X POST ${{ secrets.API_CALLBACK_URL }} \
+            -H "Authorization: Bearer ${{ secrets.HUB_CALLBACK_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "plugin_id": "${{ github.event.client_payload.plugin_id }}",
+              "commit_hash": "${{ github.event.client_payload.commit_hash }}",
+              "status": "building"
+            }'
+
       # 1. Clean workspace setup and download the verified snapshot directly from your R2 bucket
       # Expected client_payload keys: plugin_id, commit_hash, source_zip_url
       - name: Download Source Zip from Cloudflare R2
@@ -168,4 +179,16 @@ jobs:
               "plugin_id": "${{ github.event.client_payload.plugin_id }}",
               "commit_hash": "${{ github.event.client_payload.commit_hash }}",
               "status": "published"
+            }'
+
+      - name: Report Build Failure Callback
+        if: failure()
+        run: |
+          curl -X POST ${{ secrets.API_CALLBACK_URL }} \
+            -H "Authorization: Bearer ${{ secrets.HUB_CALLBACK_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "plugin_id": "${{ github.event.client_payload.plugin_id }}",
+              "commit_hash": "${{ github.event.client_payload.commit_hash }}",
+              "status": "failed"
             }'
